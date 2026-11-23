@@ -1,0 +1,31 @@
+# Python / PyInstaller
+__pycache__/
+*.pyc
+consultas_py/build/
+consultas_py/dist/
+.venv/
+venv/
+
+# Instalador: manter apenas o ConsultasSetup.exe final
+consultas_py/installer/output/*
+!consultas_py/installer/output/ConsultasSetup.exe
+
+# Delphi (artefatos de build/IDE)
+Win32/
+Win64/
+__history/
+__recovery/
+*.dcu
+*.identcache
+*.local
+*.dproj.local
+*.~*
+*.bak
+*.exe
+!consultas_py/installer/output/ConsultasSetup.exe
+
+# Configuracoes locais (podem conter credenciais) - usar *.ini.example
+*.ini
+!*.ini.example
+config*.json
+.env

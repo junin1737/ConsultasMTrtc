@@ -1,0 +1,14 @@
+; Icones dos botoes da tela principal: PNG na mesma pasta do Consultas.exe
+; (Clientes.png, Estoque.png, Orcamento.png, Receber.png, Pagar.png)
+
+[Banco]
+DriverID=FB
+FirebirdVersion=5.0
+Database=C:\Work\Realtec.FDB
+Server=127.0.0.1
+Port=3052
+User_Name=SYSDBA
+Password=masterkey
+CharacterSet=WIN1252
+WireCrypt=Disabled
+ClientLibrary=

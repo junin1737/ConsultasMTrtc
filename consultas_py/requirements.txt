@@ -1,0 +1,3 @@
+PySide6>=6.6
+firebird-driver>=1.10
+reportlab>=4.0

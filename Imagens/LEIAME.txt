@@ -1,0 +1,9 @@
+Icones fixos no executavel (ConsultasIcones.rc).
+
+Arquivos desta pasta embutidos no .exe ao compilar:
+  Clientes.png, Estoque.png, Orcamento.png, Receber.png, Pagar.png
+
+Para trocar: substitua os PNG aqui e faca Build All.
+Pre-build recompila ConsultasIcones.rc automaticamente.
+
+Opcional: PNG na pasta do .exe sobrescreve o embutido.

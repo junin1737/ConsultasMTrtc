@@ -1,0 +1,8 @@
+CLIENTES  RCDATA "Imagens\Clientes.png"
+ESTOQUE   RCDATA "Imagens\Estoque.png"
+ORCAMENTO RCDATA "Imagens\Orcamento.png"
+RECEBER   RCDATA "Imagens\Receber.png"
+PAGAR     RCDATA "Imagens\Pagar.png"
+DAV       RCDATA "Imagens\DAV.png"
+COMPRAS   RCDATA "Imagens\Compras.png"
+NOTAFISCAL RCDATA "Imagens\NotaFiscal.png"
