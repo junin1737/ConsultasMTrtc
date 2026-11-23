@@ -151,8 +151,15 @@ def vencimento_30_dias(d) -> str:
 
 
 # --- situacao de notas -----------------------------------------------------------
-def select_situacao_nota(campo_doc: str) -> str:
+def select_situacao_nota(campo_doc: str, compra: bool = False) -> str:
+    """compra=True: so 'Confirmada' / 'Cancelada' (compras nao sao transmitidas/inutilizadas)."""
     doc = f"TRIM(COALESCE({campo_doc}, ''))"
+    if compra:
+        return (
+            "CAST(CASE "
+            f"WHEN {doc} = '02' THEN 'Cancelada' "
+            "ELSE 'Confirmada' "
+            "END AS VARCHAR(20) CHARACTER SET WIN1252) AS SITUACAO_NOTA")
     return (
         "CAST(CASE "
         f"WHEN {doc} IN ('04', '05') THEN 'Inutilizada' "
@@ -161,14 +168,17 @@ def select_situacao_nota(campo_doc: str) -> str:
         "END AS VARCHAR(20) CHARACTER SET WIN1252) AS SITUACAO_NOTA")
 
 
-def cond_situacao_nota(campo_doc: str, filtro: Optional[Sequence[str]]) -> str:
-    """filtro: None/[] = todas; senao subconjunto de {'transmitidas','canceladas','inutilizadas'}."""
+def cond_situacao_nota(campo_doc: str, filtro: Optional[Sequence[str]], compra: bool = False) -> str:
+    """filtro: None/[] = todas; senao subconjunto de {'transmitidas','canceladas','inutilizadas'}.
+
+    compra=True: 'transmitidas' significa Confirmada (qualquer documento diferente de cancelado).
+    """
     if not filtro:
         return ""
     doc = f"TRIM(COALESCE({campo_doc}, ''))"
     partes = []
     if "transmitidas" in filtro:
-        partes.append(f"({doc} NOT IN ('02', '04', '05'))")
+        partes.append(f"({doc} <> '02')" if compra else f"({doc} NOT IN ('02', '04', '05'))")
     if "canceladas" in filtro:
         partes.append(f"{doc} = '02'")
     if "inutilizadas" in filtro:

@@ -92,7 +92,7 @@ class _SituacaoNotaWidget(QGroupBox):
         self.chk_todas.clicked.connect(self._todas)
         lay.addWidget(self.chk_todas)
         self.checks = {}
-        for key, label in self.ITEMS:
+        for key, label in (spec.items or self.ITEMS):
             c = QCheckBox(label)
             c.clicked.connect(self._especifica)
             self.checks[key] = c

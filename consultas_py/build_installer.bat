@@ -29,7 +29,11 @@ if not defined ISCC if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set
 
 if not exist "installer\output" mkdir "installer\output"
 if defined ISCC (
-    "%ISCC%" "installer\Consultas.iss" || exit /b 1
+    rem Compila numa pasta temporaria e depois copia: o antivirus costuma bloquear o EndUpdateResource na pasta do projeto.
+    set "TMPOUT=%TEMP%\consultas_iscc_out"
+    if exist "%TMPOUT%" rmdir /s /q "%TMPOUT%"
+    "%ISCC%" /O"%TMPOUT%" "installer\Consultas.iss" || exit /b 1
+    copy /y "%TMPOUT%\ConsultasSetup.exe" "installer\output\ConsultasSetup.exe" >nul || exit /b 1
     echo.
     echo Instalador: %CD%\installer\output\ConsultasSetup.exe
 ) else (

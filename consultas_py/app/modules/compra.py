@@ -76,7 +76,8 @@ SPEC = ModuleSpec(
     ],
     build=_build,
     detail=_detail,
-    filters=[SituacaoNotaFilter(), PeriodFilter("periodo", "Entrada")],
+    filters=[SituacaoNotaFilter(items=(("transmitidas", "Confirmadas"), ("canceladas", "Canceladas"))),
+             PeriodFilter("periodo", "Entrada")],
     row_color=cor_situacao_nota,
     wide=True,
 )

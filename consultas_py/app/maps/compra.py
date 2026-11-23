@@ -16,13 +16,13 @@ def sql_lista(f: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     w.add(cond_texto_numero(f.get("text", ""), "E.ENTCNUMERO", "P.PESNOME", params))
     w.add(cond_periodo("COALESCE(E.ENTCDTENTRADA, E.ENTCDTEMISSAO)", "DATA_INICIO", "DATA_FIM",
                        f.get("periodo"), params))
-    w.add(cond_situacao_nota("E.ENTCSITUACAODOCUMENTO", f.get("situacao")))
+    w.add(cond_situacao_nota("E.ENTCSITUACAODOCUMENTO", f.get("situacao"), compra=True))
     sql = (
         "SELECT FIRST 2000 "
         "E.EMPCODIGO, E.ENTCCONTADOR, E.ENTCNUMERO, E.ENTCSERIE, "
         "E.ENTCDTEMISSAO, E.ENTCDTENTRADA, P.PESNOME AS NOME_FORNECEDOR, "
         "E.ENTCVRTOTAL, E.ENTCSITUACAO, E.ENTCSITUACAODOCUMENTO, E.ENTCCHAVENFE, "
-        + select_situacao_nota("E.ENTCSITUACAODOCUMENTO") + " "
+        + select_situacao_nota("E.ENTCSITUACAODOCUMENTO", compra=True) + " "
         "FROM ENTRADACOMPRA E "
         "LEFT JOIN FORNECEDOR F ON F.FORCODIGO = E.FORCODIGO AND F.EMPCODIGO = E.EMPCODIGO "
         "LEFT JOIN PESSOA P ON P.PESCODIGO = F.PESCODIGO " + w.sql() +

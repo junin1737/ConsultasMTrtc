@@ -48,8 +48,8 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
         ("Número O.S.", numero),
         ("Situação", mp.descricao_situacao(d.get("OSSITUACAO"))),
         ("Emissão", (fmt.data(d.get("OSEMISSAO")) + (" " + hora if hora else "")).strip()),
-        ("Previsão de entrega", fmt.data(d.get("OSPREVISAOENTREGA"))),
         ("Cliente", fmt.texto(d.get("CLIENTE_NOME"))),
+        ("Previsão de entrega", fmt.data(d.get("OSPREVISAOENTREGA"))),
         ("Fechamento", fmt.data(d.get("OSDATAFECHAMENTO"))),
         ("Tipo", fmt.texto(d.get("OSTIPODESCRICAO"))),
         ("Estágio", fmt.texto(d.get("OSESTDESCRICAO"))),
@@ -76,19 +76,25 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
             ("Observação", fmt.texto(d.get("OSOBSERVACAO"))),
             ("Informações adicionais", fmt.texto(d.get("OSINFORMACOESADICIONAIS"))),
         ],
+        columns=3,
+        tabs=True,
+        wide_fields=["Cliente"],
     )
 
     def sec(titulo: str, cols: List[ColumnSpec], rows: List[Dict[str, Any]]) -> None:
         if rows:
             data.sections.append(DetailSection(titulo, cols, rows))
 
-    sec("Equipamentos / Veículos", [
-        ColumnSpec("OSEQUIPDESCRICAO", "Descrição", "text", 300),
-        ColumnSpec("OSEQUIPIDENTIFICACAO", "Identificação", "text", 160),
-        ColumnSpec("OSTIPEQUIPDESCRICAO", "Tipo", "text", 140),
-        ColumnSpec("PLACA", "Placa", "text", 90),
-    ], _rows_first(ctx, alias, [mp.SQL_EQUIPAMENTOS_DAV, mp.SQL_EQUIPAMENTOS_DAV_SIMPLES] if dav
-                   else [mp.SQL_EQUIPAMENTOS], p))
+    # ordem das abas: Peças, Serviços, Equipamentos, DAVs, Histórico
+    sec("Peças / Produtos", [
+        ColumnSpec("OSPRODCONTADOR", "Item", "int", 50),
+        ColumnSpec("CODIGO_ITEM", "Código", "text", 100),
+        ColumnSpec("PRODDESCRICAO", "Descrição", "text", 340),
+        ColumnSpec("OSPRODQUANTIDADE", "Qtde", "qty", 70),
+        ColumnSpec("OSPRODUNITARIO", "Vl. unitário", "money", 95),
+        ColumnSpec("OSPRODDESCONTO", "Desconto", "money", 85),
+        ColumnSpec("OSPRODLIQUIDO", "Total", "money", 100),
+    ], _rows(ctx, alias, mp.sql_produtos(conn, origem), p))
     sec("Serviços", [
         ColumnSpec("OSSERVCONTADOR", "Item", "int", 50),
         ColumnSpec("CODIGO_ITEM", "Código", "text", 100),
@@ -99,15 +105,13 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
         ColumnSpec("OSSERVDESCONTO", "Desconto", "money", 85),
         ColumnSpec("OSSERVLIQUIDO", "Total", "money", 100),
     ], _rows(ctx, alias, mp.sql_servicos(conn, origem), p))
-    sec("Peças / Produtos", [
-        ColumnSpec("OSPRODCONTADOR", "Item", "int", 50),
-        ColumnSpec("CODIGO_ITEM", "Código", "text", 100),
-        ColumnSpec("PRODDESCRICAO", "Descrição", "text", 340),
-        ColumnSpec("OSPRODQUANTIDADE", "Qtde", "qty", 70),
-        ColumnSpec("OSPRODUNITARIO", "Vl. unitário", "money", 95),
-        ColumnSpec("OSPRODDESCONTO", "Desconto", "money", 85),
-        ColumnSpec("OSPRODLIQUIDO", "Total", "money", 100),
-    ], _rows(ctx, alias, mp.sql_produtos(conn, origem), p))
+    sec("Equipamentos / Veículos", [
+        ColumnSpec("OSEQUIPDESCRICAO", "Descrição", "text", 300),
+        ColumnSpec("OSEQUIPIDENTIFICACAO", "Identificação", "text", 160),
+        ColumnSpec("OSTIPEQUIPDESCRICAO", "Tipo", "text", 140),
+        ColumnSpec("PLACA", "Placa", "text", 90),
+    ], _rows_first(ctx, alias, [mp.SQL_EQUIPAMENTOS_DAV, mp.SQL_EQUIPAMENTOS_DAV_SIMPLES] if dav
+                   else [mp.SQL_EQUIPAMENTOS], p))
     sec("DAVs vinculados", [
         ColumnSpec("DAVNUMERO", "Número DAV", "int", 110),
         ColumnSpec("DAVEMISSAO", "Emissão", "date", 100),
@@ -122,7 +126,8 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
     ], _rows_first(ctx, alias, [mp.SQL_HISTORICO_DAV, mp.SQL_HISTORICO_DAV_SIMPLES] if dav
                    else [mp.SQL_HISTORICO], p))
 
-    data.actions.append(acao_imprimir(data, f"os_{alias}_{numero}", f"Ordem de Serviço {numero}"))
+    data.actions.append(acao_imprimir(data, f"os_{alias}_{numero}", f"Ordem de Serviço {numero}",
+                                      escolher=True))
     return data
 
 

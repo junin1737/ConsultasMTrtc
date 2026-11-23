@@ -70,6 +70,9 @@ class SituacaoNotaFilter:
 
     key: str = "situacao"
     label: str = "Situação"
+    # None = Transmitidas/Canceladas/Inutilizadas; senao lista (chave, rotulo), ex.: Compras so
+    # mostra Confirmadas/Canceladas (a chave 'transmitidas' continua sendo a de "documento valido").
+    items: Optional[Tuple[Tuple[str, str], ...]] = None
 
 
 @dataclass
@@ -121,6 +124,10 @@ class DetailData:
     # (rotulo, funcao() -> None, habilitado)
     actions: List[Tuple[str, Callable[[], None], bool]] = field(default_factory=list)
     columns: int = 2
+    # True = layout compacto: secoes em abas (grade grande) + memos em abas num painel menor (divisor arrastavel)
+    tabs: bool = False
+    # rotulos de campos de texto que ocupam a linha toda no layout compacto (ex.: Cliente)
+    wide_fields: List[str] = field(default_factory=list)
 
 
 class Ctx:

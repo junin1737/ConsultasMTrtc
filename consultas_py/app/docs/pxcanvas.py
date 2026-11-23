@@ -13,12 +13,13 @@ PX = 0.75  # 1 px = 0.75 pt
 
 
 class PxCanvas:
-    def __init__(self, path: str, title: str = ""):
-        self.c = rl_canvas.Canvas(path, pagesize=A4)
+    def __init__(self, path, title: str = "", page_size: Tuple[float, float] = A4):
+        """page_size em pontos (largura, altura); `path` pode ser caminho ou arquivo em memoria."""
+        self.c = rl_canvas.Canvas(path, pagesize=page_size)
         if title:
             self.c.setTitle(title)
-        self.page_w_px = A4[0] / PX
-        self.page_h_px = A4[1] / PX
+        self.page_w_px = page_size[0] / PX
+        self.page_h_px = page_size[1] / PX
         self.font = "Helvetica"
         self.size = 8.0
         self.bold = False
