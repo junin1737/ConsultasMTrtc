@@ -7,12 +7,13 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDateEdit,
     QGroupBox,
     QHBoxLayout,
@@ -117,9 +118,28 @@ class _SituacaoNotaWidget(QGroupBox):
         return [k for k, c in self.checks.items() if c.isChecked()]
 
 
+# Threads de consulta ainda em execucao quando a janela foi fechada: mantidas vivas ate terminarem
+# (destruir um QThread em execucao aborta o processo inteiro).
+_ORPHAN_WORKERS: set = set()
+
+TODAS_BASES = "Todas as bases"
+
+
+def wait_orphan_workers(ms: int = 5000) -> None:
+    """Aguarda (limitado) consultas em andamento de janelas ja fechadas; usado ao encerrar o app."""
+    for w in list(_ORPHAN_WORKERS):
+        try:
+            w.wait(ms)
+        except RuntimeError:
+            pass
+
+
 class ConsultaWindow(QMainWindow):
+    closed = Signal()
+
     def __init__(self, manager: ConnectionManager, spec: ModuleSpec, parent=None):
         super().__init__(parent)
+        self._cursor_busy = False
         self.manager = manager
         self.spec = spec
         self.ctx = Ctx(manager, self)
@@ -144,6 +164,15 @@ class ConsultaWindow(QMainWindow):
         btn_search = QPushButton("Pesquisar")
         btn_search.clicked.connect(self.reload)
         top.addWidget(btn_search)
+        # filtro por base (apelido) - herdado por todos os modulos
+        top.addSpacing(12)
+        top.addWidget(QLabel("Base:"))
+        self.cmb_base = QComboBox()
+        self.cmb_base.setMinimumWidth(170)
+        self.cmb_base.setToolTip("Filtra os registros pela base (apelido) de origem")
+        self._fill_bases()
+        self.cmb_base.currentIndexChanged.connect(lambda _=0: self.reload())
+        top.addWidget(self.cmb_base)
         root.addLayout(top)
 
         # --- filtros --------------------------------------------------
@@ -232,6 +261,23 @@ class ConsultaWindow(QMainWindow):
     def _schedule_reload(self) -> None:
         self.reload()
 
+    def _fill_bases(self) -> None:
+        """Preenche o combo: 'Todas as bases' + cada base conectada (apelido)."""
+        atual = self.cmb_base.currentData() if self.cmb_base.count() else None
+        self.cmb_base.blockSignals(True)
+        self.cmb_base.clear()
+        self.cmb_base.addItem(TODAS_BASES, None)
+        for a in self.manager.aliases:
+            self.cmb_base.addItem(a, a)
+        i = self.cmb_base.findData(atual) if atual else 0
+        self.cmb_base.setCurrentIndex(max(i, 0))
+        self.cmb_base.setEnabled(len(self.manager.aliases) > 1)
+        self.cmb_base.blockSignals(False)
+
+    def selected_base(self) -> Optional[str]:
+        """Apelido da base escolhida no filtro (None = todas)."""
+        return self.cmb_base.currentData()
+
     def filters(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"text": self.edt_search.text().strip()}
         for f in self.spec.filters:
@@ -255,16 +301,23 @@ class ConsultaWindow(QMainWindow):
             return
         filters = self.filters()
         spec = self.spec
+        only = self.selected_base()
+        if only and only not in self.manager.aliases:
+            only = None
         self.lbl_status.setText("Consultando...")
         self.lbl_warn.setText("")
         QApplication.setOverrideCursor(Qt.BusyCursor)
-        self._worker = FuncWorker(lambda: self.manager.query_all(lambda conn: spec.build(conn, filters)), self)
+        self._cursor_busy = True
+        self._worker = FuncWorker(
+            lambda: self.manager.query_all(lambda conn: spec.build(conn, filters), only=only), self)
         self._worker.done.connect(self._loaded)
         self._worker.failed.connect(self._failed)
         self._worker.start()
 
     def _finish(self) -> None:
-        QApplication.restoreOverrideCursor()
+        if self._cursor_busy:
+            self._cursor_busy = False
+            QApplication.restoreOverrideCursor()
         if self._pending_reload:
             self._pending_reload = False
             self.reload()
@@ -284,8 +337,9 @@ class ConsultaWindow(QMainWindow):
                     self.table.sortByColumn(i, Qt.AscendingOrder)
                     break
         n = len(merged.rows)
-        bases = ", ".join(self.manager.aliases)
-        self.lbl_status.setText(f"{n} registro(s) — bases: {bases}")
+        only = self.selected_base()
+        bases = only if only and only in self.manager.aliases else ", ".join(self.manager.aliases)
+        self.lbl_status.setText(f"{n} registro(s) — base(s): {bases}")
         if merged.warnings:
             self.lbl_warn.setText("Avisos:\n" + "\n".join(merged.warnings))
         self._update_actions()
@@ -314,9 +368,24 @@ class ConsultaWindow(QMainWindow):
             QMessageBox.critical(self, self.spec.title, str(exc))
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._worker and self._worker.isRunning():
-            self._worker.wait(15000)
+        """Fecha somente esta janela; a tela inicial permanece aberta."""
+        w, self._worker = self._worker, None
+        if w is not None:
+            for sig in (w.done, w.failed):
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            if w.isRunning():
+                w.setParent(None)  # sobrevive a janela; descartada quando terminar
+                _ORPHAN_WORKERS.add(w)
+                w.finished.connect(lambda ww=w: (_ORPHAN_WORKERS.discard(ww), ww.deleteLater()))
+        if self._cursor_busy:
+            self._cursor_busy = False
+            QApplication.restoreOverrideCursor()
+        self._pending_reload = False
         super().closeEvent(event)
+        self.closed.emit()
 
     def open_detail(self) -> None:
         row = self.current_row()

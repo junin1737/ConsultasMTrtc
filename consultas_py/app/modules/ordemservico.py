@@ -12,7 +12,8 @@ from app.util import fmt
 
 
 def _build(conn, f: Dict[str, Any]):
-    return mp.sql_lista(f)
+    # detecta por base se a O.S. esta na tabela OS (legado) e/ou em DAV (DAVTIPOVENDA = 1)
+    return mp.sql_lista(f, conn)
 
 
 def _rows(ctx: Ctx, alias: str, sql: str, p: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -22,9 +23,20 @@ def _rows(ctx: Ctx, alias: str, sql: str, p: Dict[str, Any]) -> List[Dict[str, A
         return []
 
 
+def _rows_first(ctx: Ctx, alias: str, sqls: List[str], p: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Primeira consulta que retornar linhas (as seguintes sao alternativas mais simples/tolerantes)."""
+    for sql in sqls:
+        r = _rows(ctx, alias, sql, p)
+        if r:
+            return r
+    return []
+
+
 def _detail(ctx: Ctx, row: Dict[str, Any]):
     alias, emp, oc = row["Base"], fmt.to_int(row["EMPCODIGO"]), fmt.to_int(row["OSCONTADOR"])
-    d = mp.carregar_cabecalho(ctx, alias, emp, oc)
+    origem = fmt.texto(row.get("ORIGEM")) or mp.ORIGEM_OS
+    dav = origem == mp.ORIGEM_DAV
+    d = mp.carregar_cabecalho(ctx, alias, emp, oc, origem)
     if not d:
         return None
     conn = ctx.conn(alias)
@@ -50,7 +62,7 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
         ("Total", fmt.moeda(d.get("OSTOTAL"))),
         ("Total líquido", fmt.moeda(d.get("OSLIQUIDO"))),
     ]
-    seg = _rows(ctx, alias, mp.SQL_SEGURADORA, p)
+    seg = [] if dav else _rows(ctx, alias, mp.SQL_SEGURADORA, p)
     if seg:
         fields.append(("Sinistro", fmt.texto(seg[0].get("OSSEGNUMEROSINISTRO"))))
         fields.append(("Seguradora", fmt.texto(seg[0].get("SEGURADORA"))))
@@ -75,7 +87,8 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
         ColumnSpec("OSEQUIPIDENTIFICACAO", "Identificação", "text", 160),
         ColumnSpec("OSTIPEQUIPDESCRICAO", "Tipo", "text", 140),
         ColumnSpec("PLACA", "Placa", "text", 90),
-    ], _rows(ctx, alias, mp.SQL_EQUIPAMENTOS, p))
+    ], _rows_first(ctx, alias, [mp.SQL_EQUIPAMENTOS_DAV, mp.SQL_EQUIPAMENTOS_DAV_SIMPLES] if dav
+                   else [mp.SQL_EQUIPAMENTOS], p))
     sec("Serviços", [
         ColumnSpec("OSSERVCONTADOR", "Item", "int", 50),
         ColumnSpec("CODIGO_ITEM", "Código", "text", 100),
@@ -85,7 +98,7 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
         ColumnSpec("OSSERVUNITARIO", "Vl. unitário", "money", 95),
         ColumnSpec("OSSERVDESCONTO", "Desconto", "money", 85),
         ColumnSpec("OSSERVLIQUIDO", "Total", "money", 100),
-    ], _rows(ctx, alias, mp.sql_servicos(conn), p))
+    ], _rows(ctx, alias, mp.sql_servicos(conn, origem), p))
     sec("Peças / Produtos", [
         ColumnSpec("OSPRODCONTADOR", "Item", "int", 50),
         ColumnSpec("CODIGO_ITEM", "Código", "text", 100),
@@ -94,19 +107,20 @@ def _detail(ctx: Ctx, row: Dict[str, Any]):
         ColumnSpec("OSPRODUNITARIO", "Vl. unitário", "money", 95),
         ColumnSpec("OSPRODDESCONTO", "Desconto", "money", 85),
         ColumnSpec("OSPRODLIQUIDO", "Total", "money", 100),
-    ], _rows(ctx, alias, mp.sql_produtos(conn), p))
+    ], _rows(ctx, alias, mp.sql_produtos(conn, origem), p))
     sec("DAVs vinculados", [
         ColumnSpec("DAVNUMERO", "Número DAV", "int", 110),
         ColumnSpec("DAVEMISSAO", "Emissão", "date", 100),
         ColumnSpec("DAVTOTALLIQUIDO", "Valor total", "money", 120),
-    ], _rows(ctx, alias, mp.SQL_DAVS, p))
+    ], _rows(ctx, alias, mp.SQL_DAVS_DAV if dav else mp.SQL_DAVS, p))
     sec("Histórico de estágios", [
         ColumnSpec("OSESTHISTDATA", "Data", "date", 90),
         ColumnSpec("OSESTHISTHORA", "Hora", "text", 60),
         ColumnSpec("OSESTDESCRICAO", "Estágio", "text", 180),
         ColumnSpec("PESNOME", "Responsável", "text", 180),
         ColumnSpec("OSESTHISTOBS", "Observação", "text", 300),
-    ], _rows(ctx, alias, mp.SQL_HISTORICO, p))
+    ], _rows_first(ctx, alias, [mp.SQL_HISTORICO_DAV, mp.SQL_HISTORICO_DAV_SIMPLES] if dav
+                   else [mp.SQL_HISTORICO], p))
 
     data.actions.append(acao_imprimir(data, f"os_{alias}_{numero}", f"Ordem de Serviço {numero}"))
     return data
@@ -123,6 +137,7 @@ SPEC = ModuleSpec(
         ColumnSpec("EMPCODIGO", "Empresa", "int", hidden=True),
         ColumnSpec("OSCONTADOR", "Contador", "int", hidden=True),
         ColumnSpec("OSSITUACAO", "Situação", "int", hidden=True),
+        ColumnSpec("ORIGEM", "Origem", "text", hidden=True),
         ColumnSpec("OSNUMERO", "Número", "int", 80),
         ColumnSpec("OSEMISSAO", "Emissão", "date", 90),
         ColumnSpec("OSPREVISAOENTREGA", "Previsão", "date", 90),

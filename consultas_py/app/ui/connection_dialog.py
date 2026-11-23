@@ -79,7 +79,7 @@ class ConnectDialog(QDialog):
         self.edt_user = QLineEdit()
         self.edt_pass = QLineEdit()
         self.edt_pass.setEchoMode(QLineEdit.Password)
-        form.addRow("Base salva:", self.cmb)
+        form.addRow("Base (apelido):", self.cmb)
         form.addRow("Banco (.fdb):", r)
         form.addRow("Servidor:", self.edt_server)
         form.addRow("Porta:", self.edt_port)

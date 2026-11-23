@@ -70,11 +70,24 @@ def config_path() -> str:
     return os.path.join(config_dir(), "consultas_config.json")
 
 
+def friendly_name(database: str) -> str:
+    """Nome curto e amigavel derivado do arquivo (ex.: ``C:\\treicon\\TREICON1.FDB`` -> ``Treicon1``)."""
+    stem = os.path.splitext(os.path.basename((database or "").replace("/", os.sep)))[0].strip()
+    if not stem:
+        return "Base"
+    stem = stem.replace("_", " ").replace("-", " ")
+    return stem.title() if stem.isupper() or stem.islower() else stem
+
+
 @dataclass
 class BaseConfig:
-    """Uma conexao Firebird configurada."""
+    """Uma conexao Firebird configurada.
 
-    alias: str = ""
+    ``apelido`` e o nome exibido em toda a interface (coluna Base, filtro por base, dialogos) e tambem a
+    chave de identificacao da conexao (unica). Persistido no JSON como ``apelido`` (le o legado ``alias``).
+    """
+
+    apelido: str = ""
     database: str = ""
     server: str = FB_SERVIDOR_LOCAL
     port: str = ""  # vazio = detectar pelo servico Firebird
@@ -93,14 +106,24 @@ class BaseConfig:
     def effective_server(self) -> str:
         return (self.server or "").strip() or FB_SERVIDOR_LOCAL
 
+    @property
+    def alias(self) -> str:
+        """Compatibilidade: identificador da conexao == apelido (ou nome amigavel se vazio)."""
+        return self.label()
+
+    @alias.setter
+    def alias(self, value: str) -> None:
+        self.apelido = value
+
     def label(self) -> str:
-        return self.alias or os.path.basename(self.database) or "base"
+        """Texto exibido para a base: apelido ou, se vazio, nome curto derivado do arquivo."""
+        return (self.apelido or "").strip() or friendly_name(self.database)
 
 
 def _default_bases() -> List[BaseConfig]:
     return [
-        BaseConfig(alias="treicon1", database=r"C:\treicon\TREICON1.FDB"),
-        BaseConfig(alias="neo", database=r"C:\treicon\NEO.FDB"),
+        BaseConfig(apelido="Treicon1", database=r"C:\treicon\TREICON1.FDB"),
+        BaseConfig(apelido="Neo", database=r"C:\treicon\NEO.FDB"),
     ]
 
 
@@ -134,15 +157,16 @@ class AppConfig:
         if self.mode not in (MODO_UMA, MODO_VARIAS):
             self.mode = MODO_VARIAS
         seen = set()
+        seen_lower = set()
         for b in self.bases:
-            if not b.alias:
-                b.alias = os.path.splitext(os.path.basename(b.database))[0] or "base"
-            base_alias = b.alias
+            b.apelido = (b.apelido or "").strip() or friendly_name(b.database)
+            base_alias = b.apelido
             n = 2
-            while b.alias in seen:
-                b.alias = f"{base_alias}_{n}"
+            while b.apelido.lower() in seen_lower:
+                b.apelido = f"{base_alias} ({n})"
                 n += 1
-            seen.add(b.alias)
+            seen.add(b.apelido)
+            seen_lower.add(b.apelido.lower())
         self.selected = [a for a in self.selected if a in seen]
         if self.single not in seen:
             self.single = self.bases[0].alias if self.bases else ""
@@ -164,7 +188,10 @@ class AppConfig:
         known = {f.name for f in fields(BaseConfig)}
         bases = []
         for raw in data.get("bases", []):
-            bases.append(BaseConfig(**{k: str(v) for k, v in raw.items() if k in known}))
+            kw = {k: str(v) for k, v in raw.items() if k in known}
+            if not kw.get("apelido") and raw.get("alias"):  # config antiga usava "alias"
+                kw["apelido"] = str(raw["alias"])
+            bases.append(BaseConfig(**kw))
         cfg = cls(
             mode=data.get("mode", MODO_VARIAS),
             bases=bases,

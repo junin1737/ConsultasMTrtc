@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import MODO_UMA, MODO_VARIAS, AppConfig, BaseConfig
+from app.config import MODO_UMA, MODO_VARIAS, AppConfig, BaseConfig, friendly_name
 from app.db import detect_fb
 from app.db.connection import FirebirdConnection, client_library_loaded
 
@@ -52,7 +52,9 @@ class BaseEditDialog(QDialog):
         b = base or BaseConfig()
         form = QFormLayout(self)
 
-        self.edt_alias = QLineEdit(b.alias)
+        self.edt_alias = QLineEdit(b.apelido)
+        self.edt_alias.setPlaceholderText("ex.: Matriz, Filial Centro (nome exibido nas consultas e no filtro por base)")
+        self.edt_alias.setMaxLength(40)
         self.edt_db = QLineEdit(b.database)
         btn_db = QPushButton("...")
         btn_db.setFixedWidth(32)
@@ -76,7 +78,13 @@ class BaseEditDialog(QDialog):
         row2.addWidget(self.edt_client, 1)
         row2.addWidget(btn_cl)
 
-        form.addRow("Apelido:", self.edt_alias)
+        lbl_ap = QLabel("<b>Apelido:</b>")
+        form.addRow(lbl_ap, self.edt_alias)
+        hint = QLabel("O apelido aparece na coluna <b>Base</b> das consultas e no filtro \"Base\" de cada lista. "
+                      "Se ficar vazio, será usado o nome do arquivo.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #55657a;")
+        form.addRow("", hint)
         form.addRow("Banco (.fdb):", row)
         form.addRow("Servidor:", self.edt_server)
         form.addRow("Porta:", self.edt_port)
@@ -100,8 +108,7 @@ class BaseEditDialog(QDialog):
         if p:
             self.edt_db.setText(p.replace("/", "\\"))
             if not self.edt_alias.text().strip():
-                import os
-                self.edt_alias.setText(os.path.splitext(os.path.basename(p))[0].lower())
+                self.edt_alias.setText(friendly_name(p))
 
     def _browse_client(self) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "fbclient.dll", self.edt_client.text(), "DLL (*.dll);;Todos (*.*)")
@@ -110,7 +117,7 @@ class BaseEditDialog(QDialog):
 
     def value(self) -> BaseConfig:
         b = copy.copy(self._base)
-        b.alias = self.edt_alias.text().strip()
+        b.apelido = self.edt_alias.text().strip()
         b.database = self.edt_db.text().strip()
         b.server = self.edt_server.text().strip() or "127.0.0.1"
         b.port = self.edt_port.text().strip()
@@ -127,6 +134,18 @@ class BaseEditDialog(QDialog):
         if not self.edt_db.text().strip():
             QMessageBox.warning(self, "Base", "Informe o caminho do banco (.fdb).")
             return
+        if not self.edt_alias.text().strip():
+            sugestao = friendly_name(self.edt_db.text())
+            r = QMessageBox.question(
+                self, "Apelido",
+                f"Nenhum apelido informado. Sem apelido a base aparecerá como \"{sugestao}\".\n\n"
+                "Deseja informar um apelido agora? (recomendado)",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if r == QMessageBox.Yes:
+                self.edt_alias.setText(sugestao)
+                self.edt_alias.setFocus()
+                self.edt_alias.selectAll()
+                return
         self.accept()
 
 
@@ -140,6 +159,7 @@ class ConfigDialog(QDialog):
         self.setWindowTitle("Configurações")
         self.resize(780, 520)
         self._bases: List[BaseConfig] = [copy.copy(b) for b in cfg.bases]
+        self._orig: List[Optional[str]] = [b.label() for b in cfg.bases]  # apelido original (p/ renomeacao)
         self._cfg = cfg
 
         root = QVBoxLayout(self)
@@ -201,7 +221,7 @@ class ConfigDialog(QDialog):
     def _refresh(self) -> None:
         self.table.setRowCount(len(self._bases))
         for r, b in enumerate(self._bases):
-            vals = [b.alias, b.database, b.server, b.port or "auto", b.user]
+            vals = [b.label() + ("" if (b.apelido or "").strip() else "  (sem apelido)"), b.database, b.server, b.port or "auto", b.user]
             for c, v in enumerate(vals):
                 self.table.setItem(r, c, QTableWidgetItem(v))
         self.table.resizeColumnToContents(0)
@@ -213,6 +233,7 @@ class ConfigDialog(QDialog):
         dlg = BaseEditDialog(None, self, "Nova base")
         if dlg.exec() == QDialog.Accepted:
             self._bases.append(dlg.value())
+            self._orig.append(None)
             self._refresh()
 
     def _edit(self) -> None:
@@ -230,6 +251,7 @@ class ConfigDialog(QDialog):
             return
         if QMessageBox.question(self, "Remover", f"Remover a base '{self._bases[i].label()}'?") == QMessageBox.Yes:
             del self._bases[i]
+            del self._orig[i]
             self._refresh()
 
     def _test(self) -> None:
@@ -246,6 +268,17 @@ class ConfigDialog(QDialog):
         cfg = self._cfg
         cfg.mode = MODO_UMA if self.rb_one.isChecked() else MODO_VARIAS
         cfg.ask_on_start = self.chk_ask.isChecked()
+        old_selected, old_single = list(cfg.selected), cfg.single
         cfg.bases = self._bases
         cfg.normalize()
+        # acompanha apelidos renomeados (selecao e base unica referenciam o apelido)
+        ren = {o: b.apelido for o, b in zip(self._orig, self._bases) if o}
+        valid = {b.apelido for b in self._bases}
+        sel = [ren.get(a, a) for a in old_selected]
+        sel = [a for a in sel if a in valid]
+        if sel:
+            cfg.selected = sel
+        single = ren.get(old_single, old_single)
+        if single in valid:
+            cfg.single = single
         self.accept()

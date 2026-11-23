@@ -22,7 +22,7 @@ from app import APP_NAME, __version__
 from app.config import MODO_UMA, AppConfig, save_config
 from app.db.pool import ConnectionManager
 from app.modules import MODULES
-from app.ui.base_list import ConsultaWindow
+from app.ui.base_list import ConsultaWindow, wait_orphan_workers
 from app.ui.config_dialog import ConfigDialog
 from app.ui.connection_dialog import ConnectDialog
 from app.ui.theme import icon_path
@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.manager = manager
         self._windows: List[ConsultaWindow] = []
+        self._closing = False
         self.setWindowTitle(APP_NAME)
         self.resize(900, 520)
 
@@ -168,13 +169,31 @@ class MainWindow(QMainWindow):
         if not self.manager.is_connected():
             if not self.connect_flow():
                 return
+        # janela independente (sem parent); a tela inicial nunca e fechada ao fechar um modulo
         w = ConsultaWindow(self.manager, spec, None)
         w.setAttribute(Qt.WA_DeleteOnClose, True)
-        w.destroyed.connect(lambda _=None, ww=w: self._windows.remove(ww) if ww in self._windows else None)
+        w.closed.connect(lambda ww=w: self._module_closed(ww))
         self._windows.append(w)
         w.show()
 
+    def _module_closed(self, w) -> None:
+        """Modulo fechado: remove da lista e traz a tela inicial de volta (nao encerra o app)."""
+        if w in self._windows:
+            self._windows.remove(w)
+        if self._closing:
+            return
+        if self.isMinimized():
+            self.showNormal()
+        elif not self.isVisible():
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def closeEvent(self, event) -> None:  # noqa: N802
+        # somente aqui o aplicativo e encerrado
+        self._closing = True
         self.close_windows()
         self.manager.disconnect_all()
+        wait_orphan_workers(5000)
         super().closeEvent(event)
+        QApplication.quit()

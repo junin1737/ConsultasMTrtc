@@ -1,15 +1,20 @@
-"""SQL/regras de Ordens de Servico (tabelas OS*, descobertas via RDB$RELATIONS).
+"""SQL/regras de Ordens de Servico.
 
-Tabelas usadas:
-  OS (cabecalho), OSPRODUTO (pecas), OSSERVICO (servicos), OSTIPO (tipo), OSESTAGIOS (estagio atual),
-  OSESTAGIOSHISTORICO (historico de estagios), OSDAV (DAVs vinculados), OSEQUIPAMENTOOS + OSEQUIPAMENTO
-  (equipamentos), OSEQUIPAMENTOVEICULO + OSVEICULOS (veiculos/placas), OSSERVICOFUNCIONARIO / FUNCIONARIO,
-  OSSEGURADORA (sinistro), OSKM (deslocamento).
-OSSITUACAO: 0 = Aberta, 1 = Finalizada, 2 = Cancelada (conforme triggers da base).
+Existem dois modelos de armazenamento nas bases Realtec e o app suporta ambos (por base, automaticamente):
+
+* **Modelo legado**: tabela ``OS`` (cabecalho) + OSPRODUTO / OSSERVICO / OSESTAGIOSHISTORICO / OSEQUIPAMENTOOS ...
+  (``ORIGEM = 'OS'``).
+* **Modelo atual (DAV)**: a O.S. e um registro da tabela ``DAV`` com ``DAVTIPOVENDA = 1`` (venda "de servico");
+  itens em DAVITEM (pecas) e DAVITEMSERVICO (servicos), estagios em DAVESTAGIO / DAVESTAGIOHISTORICO,
+  tipo em OSTIPO (``DAV.OSTIPOCONTADOR``), equipamentos em DAVEQUIPAMENTO -> OSEQUIPAMENTO
+  (``ORIGEM = 'DAV'``). Nessas bases a tabela ``OS`` fica vazia (ex.: NEO.FDB e TREICON1.FDB).
+
+Se uma base tiver as duas coisas, a lista traz a uniao (``UNION ALL``).
+DAVSITUACAO / OSSITUACAO: 0 = Aberta, 1 = Finalizada, 2 = Cancelada.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.maps.common import (
     Where, cond_periodo, cond_texto_numero, nome_usuario, select_codigo_produto, select_codigo_servico,
@@ -17,6 +22,9 @@ from app.maps.common import (
 from app.util import fmt
 
 SITUACAO_OS = {0: "Aberta", 1: "Finalizada", 2: "Cancelada"}
+
+ORIGEM_OS = "OS"      # tabela OS (legado)
+ORIGEM_DAV = "DAV"    # DAV com DAVTIPOVENDA = 1
 
 
 def descricao_situacao(v: Any) -> str:
@@ -32,46 +40,145 @@ def cor_linha(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# --- deteccao do modelo por base ---------------------------------------------------
+def _tabela_tem_linhas(conn, sql: str) -> bool:
+    try:
+        return bool(conn.query(sql, None, 1).rows)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def origens_disponiveis(conn) -> List[str]:
+    """Quais modelos existem nesta base: 'DAV' (DAVTIPOVENDA = 1) e/ou 'OS' (tabela OS com linhas).
+
+    Sempre devolve ao menos um (a lista fica vazia, nao quebra, se a base nao tiver nada).
+    """
+    origens: List[str] = []
+    try:
+        dav_ok = "DAVTIPOVENDA" in conn.table_columns("DAV")
+    except Exception:  # noqa: BLE001
+        dav_ok = False
+    if dav_ok:
+        origens.append(ORIGEM_DAV)
+    # tabela OS: so entra se tiver linhas (ou se for o unico modelo possivel)
+    os_tem = _tabela_tem_linhas(conn, "SELECT FIRST 1 1 FROM OS")
+    if os_tem or not dav_ok:
+        origens.append(ORIGEM_OS)
+    return origens
+
+
 # --- lista ---------------------------------------------------------------------
-def sql_lista(f: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    params: Dict[str, Any] = {}
-    w = Where()
+def _filtro_comum(f: Dict[str, Any], params: Dict[str, Any], w: Where, a: Dict[str, str]) -> None:
+    """Filtros da tela. ``a`` mapeia nomes logicos -> colunas SQL do modelo (legado ou DAV)."""
     texto = (f.get("text") or "").strip()
     if texto and not fmt.so_digitos(texto):
         params["FILTRO_TEXTO"] = texto
-        w.add("(P.PESNOME CONTAINING :FILTRO_TEXTO OR O.OSOBSERVACAO CONTAINING :FILTRO_TEXTO "
-              "OR O.OSDEFEITORECLAMADO CONTAINING :FILTRO_TEXTO "
-              "OR EXISTS (SELECT 1 FROM OSEQUIPAMENTOOS EO "
-              "JOIN OSEQUIPAMENTO EQ ON EQ.EMPCODIGO = EO.EMPCODIGO AND EQ.OSEQUIPCONTADOR = EO.OSEQUIPCONTADOR "
-              "WHERE EO.EMPCODIGO = O.EMPCODIGO AND EO.OSCONTADOR = O.OSCONTADOR "
-              "AND (EQ.OSEQUIPDESCRICAO CONTAINING :FILTRO_TEXTO OR EQ.OSEQUIPIDENTIFICACAO CONTAINING :FILTRO_TEXTO)))")
+        w.add(f"(P.PESNOME CONTAINING :FILTRO_TEXTO OR {a['obs']} CONTAINING :FILTRO_TEXTO "
+              f"OR {a['defeito']} CONTAINING :FILTRO_TEXTO "
+              f"OR EXISTS ({a['sql_equip']}))")
     else:
-        w.add(cond_texto_numero(texto, "O.OSNUMERO", "P.PESNOME", params))
+        w.add(cond_texto_numero(texto, a["numero"], "P.PESNOME", params))
     sit = f.get("situacao")
     if sit in ("0", "1", "2", 0, 1, 2):
-        w.add("O.OSSITUACAO = :SITUACAO")
+        w.add(f"{a['situacao']} = :SITUACAO")
         params["SITUACAO"] = int(sit)
     cod = (f.get("codigo_cliente") or "").strip()
     if cod:
-        w.add("O.CLICODIGO = :CODIGO_CLIENTE")
+        w.add(f"{a['cliente']} = :CODIGO_CLIENTE")
         params["CODIGO_CLIENTE"] = fmt.to_int(cod)
-    w.add(cond_periodo("O.OSEMISSAO", "EMI_INICIO", "EMI_FIM", f.get("emissao"), params))
-    w.add(cond_periodo("O.OSPREVISAOENTREGA", "PREV_INICIO", "PREV_FIM", f.get("previsao"), params))
-    sql = (
-        "SELECT FIRST 2000 "
-        "O.EMPCODIGO, O.OSCONTADOR, O.OSNUMERO, O.OSEMISSAO, O.OSHORA, O.OSPREVISAOENTREGA, O.OSDATAFECHAMENTO, "
-        "O.CLICODIGO AS CODIGO_CLIENTE, "
-        "CAST(TRIM(COALESCE(P.PESNOME, '')) AS VARCHAR(250) CHARACTER SET WIN1252) AS NOME_CLIENTE, "
-        "CAST(TRIM(COALESCE(T.OSTIPODESCRICAO, '')) AS VARCHAR(100) CHARACTER SET WIN1252) AS TIPO_OS, "
-        "CAST(TRIM(COALESCE(E.OSESTDESCRICAO, '')) AS VARCHAR(100) CHARACTER SET WIN1252) AS ESTAGIO, "
-        "O.OSSITUACAO, O.OSTOTAL, O.OSDESCONTO, O.OSLIQUIDO "
+    w.add(cond_periodo(a["emissao"], "EMI_INICIO", "EMI_FIM", f.get("emissao"), params))
+    w.add(cond_periodo(a["previsao"], "PREV_INICIO", "PREV_FIM", f.get("previsao"), params))
+
+
+_SELECT_LISTA = (
+    "{origem} AS ORIGEM, "
+    "{alias}.EMPCODIGO, {contador} AS OSCONTADOR, {numero} AS OSNUMERO, {emissao} AS OSEMISSAO, "
+    "{hora} AS OSHORA, {previsao} AS OSPREVISAOENTREGA, {fechamento} AS OSDATAFECHAMENTO, "
+    "{alias}.CLICODIGO AS CODIGO_CLIENTE, "
+    "CAST(TRIM(COALESCE(P.PESNOME, '')) AS VARCHAR(250) CHARACTER SET WIN1252) AS NOME_CLIENTE, "
+    "CAST(TRIM(COALESCE(T.OSTIPODESCRICAO, '')) AS VARCHAR(100) CHARACTER SET WIN1252) AS TIPO_OS, "
+    "CAST(TRIM(COALESCE(E.{est_desc}, '')) AS VARCHAR(100) CHARACTER SET WIN1252) AS ESTAGIO, "
+    "{situacao} AS OSSITUACAO, {total} AS OSTOTAL, {desconto} AS OSDESCONTO, {liquido} AS OSLIQUIDO "
+)
+
+
+def _lista_legado(f: Dict[str, Any], params: Dict[str, Any]) -> str:
+    w = Where()
+    a = {
+        "numero": "O.OSNUMERO", "situacao": "O.OSSITUACAO", "cliente": "O.CLICODIGO",
+        "emissao": "O.OSEMISSAO", "previsao": "O.OSPREVISAOENTREGA",
+        "obs": "O.OSOBSERVACAO", "defeito": "O.OSDEFEITORECLAMADO",
+        "sql_equip": (
+            "SELECT 1 FROM OSEQUIPAMENTOOS EO "
+            "JOIN OSEQUIPAMENTO EQ ON EQ.EMPCODIGO = EO.EMPCODIGO AND EQ.OSEQUIPCONTADOR = EO.OSEQUIPCONTADOR "
+            "WHERE EO.EMPCODIGO = O.EMPCODIGO AND EO.OSCONTADOR = O.OSCONTADOR "
+            "AND (EQ.OSEQUIPDESCRICAO CONTAINING :FILTRO_TEXTO OR EQ.OSEQUIPIDENTIFICACAO CONTAINING :FILTRO_TEXTO)"
+        ),
+    }
+    _filtro_comum(f, params, w, a)
+    cols = _SELECT_LISTA.format(
+        origem=f"'{ORIGEM_OS}'", alias="O", contador="O.OSCONTADOR", numero="O.OSNUMERO", emissao="O.OSEMISSAO",
+        hora="O.OSHORA", previsao="O.OSPREVISAOENTREGA", fechamento="O.OSDATAFECHAMENTO",
+        est_desc="OSESTDESCRICAO", situacao="O.OSSITUACAO", total="O.OSTOTAL", desconto="O.OSDESCONTO",
+        liquido="O.OSLIQUIDO")
+    return (
+        "SELECT " + cols +
         "FROM OS O "
         "LEFT JOIN CLIENTE C ON C.CLICODIGO = O.CLICODIGO AND C.EMPCODIGO = O.EMPCODIGO "
         "LEFT JOIN PESSOA P ON P.PESCODIGO = C.PESCODIGO "
         "LEFT JOIN OSTIPO T ON T.EMPCODIGO = O.EMPCODIGO AND T.OSTIPOCONTADOR = O.OSTIPOCONTADOR "
         "LEFT JOIN OSESTAGIOS E ON E.EMPCODIGO = O.EMPCODIGO AND E.OSESTCONTADOR = O.OSESTCONTADOR "
-        + w.sql() + " ORDER BY O.OSEMISSAO DESC, O.OSNUMERO DESC"
+        + w.sql()
     )
+
+
+def _lista_dav(f: Dict[str, Any], params: Dict[str, Any]) -> str:
+    w = Where()
+    w.add("D.DAVTIPOVENDA = 1")  # 1 = venda de servico (O.S.)
+    a = {
+        "numero": "D.DAVNUMERO", "situacao": "D.DAVSITUACAO", "cliente": "D.CLICODIGO",
+        "emissao": "D.DAVEMISSAO", "previsao": "D.DAVDATAENTREGA",
+        "obs": "D.DAVOBS", "defeito": "D.DAVDEFEITORECLAMADO",
+        "sql_equip": (
+            "SELECT 1 FROM DAVEQUIPAMENTO DE "
+            "JOIN OSEQUIPAMENTO EQ ON EQ.EMPCODIGO = DE.EMPCODIGO AND EQ.OSEQUIPCONTADOR = DE.OSEQUIPCONTADOR "
+            "WHERE DE.EMPCODIGO = D.EMPCODIGO AND DE.DAVCONTADOR = D.DAVCONTADOR "
+            "AND (EQ.OSEQUIPDESCRICAO CONTAINING :FILTRO_TEXTO OR EQ.OSEQUIPIDENTIFICACAO CONTAINING :FILTRO_TEXTO)"
+        ),
+    }
+    _filtro_comum(f, params, w, a)
+    cols = _SELECT_LISTA.format(
+        origem=f"'{ORIGEM_DAV}'", alias="D", contador="D.DAVCONTADOR", numero="D.DAVNUMERO", emissao="D.DAVEMISSAO",
+        hora="D.DAVHORA", previsao="D.DAVDATAENTREGA", fechamento="D.DAVDATAFECHAMENTO",
+        est_desc="DAVESTDESCRICAO", situacao="D.DAVSITUACAO", total="D.DAVTOTAL", desconto="D.DAVDESCONTO",
+        liquido="D.DAVTOTALLIQUIDO")
+    return (
+        "SELECT " + cols +
+        "FROM DAV D "
+        "LEFT JOIN CLIENTE C ON C.CLICODIGO = D.CLICODIGO AND C.EMPCODIGO = D.EMPCODIGO "
+        "LEFT JOIN PESSOA P ON P.PESCODIGO = C.PESCODIGO "
+        "LEFT JOIN OSTIPO T ON T.EMPCODIGO = D.EMPCODIGO AND T.OSTIPOCONTADOR = D.OSTIPOCONTADOR "
+        "LEFT JOIN DAVESTAGIO E ON E.EMPCODIGO = D.EMPCODIGO AND E.DAVESTCONTADOR = D.DAVESTCONTADOR "
+        + w.sql()
+    )
+
+
+_ORDEM = " ORDER BY OSEMISSAO DESC, OSNUMERO DESC"
+
+
+def sql_lista(f: Dict[str, Any], conn=None) -> Tuple[str, Dict[str, Any]]:
+    """SQL da lista. Com ``conn`` detecta o(s) modelo(s) da base; sem ``conn`` assume DAV + legado."""
+    params: Dict[str, Any] = {}
+    origens = origens_disponiveis(conn) if conn is not None else [ORIGEM_DAV, ORIGEM_OS]
+    selects: List[str] = []
+    for o in origens:
+        selects.append(_lista_dav(f, params) if o == ORIGEM_DAV else _lista_legado(f, params))
+    if not selects:  # base sem OS nem DAV: devolve vazio mantendo as colunas
+        selects.append(_lista_legado(f, params))
+    if len(selects) == 1:
+        sql = "SELECT FIRST 2000 * FROM (" + selects[0] + ")" + _ORDEM
+    else:
+        sql = "SELECT FIRST 2000 * FROM (" + " UNION ALL ".join(selects) + ")" + _ORDEM
     return sql, params
 
 
@@ -100,20 +207,66 @@ _SQL_CAB_FALLBACK = (
     "WHERE O.EMPCODIGO = :EMPCODIGO AND O.OSCONTADOR = :OSCONTADOR"
 )
 
+# O.S. no modelo DAV: devolve as colunas com os mesmos nomes do modelo legado (OS*), para o detalhe ser unico.
+_SQL_CAB_DAV = (
+    "SELECT D.*, "
+    "D.DAVNUMERO AS OSNUMERO, D.DAVEMISSAO AS OSEMISSAO, D.DAVHORA AS OSHORA, "
+    "D.DAVDATAENTREGA AS OSPREVISAOENTREGA, D.DAVDATAFECHAMENTO AS OSDATAFECHAMENTO, "
+    "D.DAVSITUACAO AS OSSITUACAO, D.DAVTOTALPECAS AS OSVALORPECAS, D.DAVTOTALSERVICOS AS OSVALORSERVICOS, "
+    "D.DAVTOTAL AS OSTOTAL, D.DAVDESCONTO AS OSDESCONTO, D.DAVTOTALLIQUIDO AS OSLIQUIDO, "
+    "D.DAVDEFEITORECLAMADO AS OSDEFEITORECLAMADO, D.DAVDEFEITOIDENTIFICADO AS OSDEFEITOIDENTIFICADO, "
+    "D.DAVOBS AS OSOBSERVACAO, D.DAVINFORMACOESADICIONAIS AS OSINFORMACOESADICIONAIS, "
+    "P.PESNOME AS CLIENTE_NOME, T.OSTIPODESCRICAO, E.DAVESTDESCRICAO AS OSESTDESCRICAO, "
+    "PF.PESNOME AS FUNCIONARIO_NOME, FP.FORPAGDESCRICAO "
+    "FROM DAV D "
+    "LEFT JOIN CLIENTE C ON C.CLICODIGO = D.CLICODIGO AND C.EMPCODIGO = D.EMPCODIGO "
+    "LEFT JOIN PESSOA P ON P.PESCODIGO = C.PESCODIGO "
+    "LEFT JOIN OSTIPO T ON T.EMPCODIGO = D.EMPCODIGO AND T.OSTIPOCONTADOR = D.OSTIPOCONTADOR "
+    "LEFT JOIN DAVESTAGIO E ON E.EMPCODIGO = D.EMPCODIGO AND E.DAVESTCONTADOR = D.DAVESTCONTADOR "
+    "LEFT JOIN FUNCIONARIO F ON F.EMPCODIGO = D.EMPCODIGO AND F.FUNCODIGO = D.FUNCODIGO "
+    "LEFT JOIN PESSOA PF ON PF.PESCODIGO = F.PESCODIGO "
+    "LEFT JOIN FORMAPAGAMENTO FP ON FP.EMPCODIGO = D.EMPCODIGO AND FP.FORPAGCONTADOR = D.FORPAGCONTADOR "
+    "WHERE D.EMPCODIGO = :EMPCODIGO AND D.DAVCONTADOR = :OSCONTADOR"
+)
+_SQL_CAB_DAV_FALLBACK = (
+    "SELECT D.*, "
+    "D.DAVNUMERO AS OSNUMERO, D.DAVEMISSAO AS OSEMISSAO, D.DAVHORA AS OSHORA, "
+    "D.DAVDATAENTREGA AS OSPREVISAOENTREGA, D.DAVDATAFECHAMENTO AS OSDATAFECHAMENTO, "
+    "D.DAVSITUACAO AS OSSITUACAO, D.DAVTOTALPECAS AS OSVALORPECAS, D.DAVTOTALSERVICOS AS OSVALORSERVICOS, "
+    "D.DAVTOTAL AS OSTOTAL, D.DAVDESCONTO AS OSDESCONTO, D.DAVTOTALLIQUIDO AS OSLIQUIDO, "
+    "D.DAVDEFEITORECLAMADO AS OSDEFEITORECLAMADO, D.DAVDEFEITOIDENTIFICADO AS OSDEFEITOIDENTIFICADO, "
+    "D.DAVOBS AS OSOBSERVACAO, D.DAVINFORMACOESADICIONAIS AS OSINFORMACOESADICIONAIS, "
+    "P.PESNOME AS CLIENTE_NOME "
+    "FROM DAV D "
+    "LEFT JOIN CLIENTE C ON C.CLICODIGO = D.CLICODIGO AND C.EMPCODIGO = D.EMPCODIGO "
+    "LEFT JOIN PESSOA P ON P.PESCODIGO = C.PESCODIGO "
+    "WHERE D.EMPCODIGO = :EMPCODIGO AND D.DAVCONTADOR = :OSCONTADOR"
+)
 
-def carregar_cabecalho(ctx, alias: str, emp: int, os_: int) -> Optional[Dict[str, Any]]:
+
+def carregar_cabecalho(ctx, alias: str, emp: int, os_: int, origem: str = ORIGEM_OS) -> Optional[Dict[str, Any]]:
     p = {"EMPCODIGO": emp, "OSCONTADOR": os_}
+    sql, fallback = ((_SQL_CAB_DAV, _SQL_CAB_DAV_FALLBACK) if origem == ORIGEM_DAV
+                     else (_SQL_CAB, _SQL_CAB_FALLBACK))
     try:
-        r = ctx.query(alias, _SQL_CAB, p).first()
+        r = ctx.query(alias, sql, p).first()
     except Exception:  # noqa: BLE001
-        r = ctx.query(alias, _SQL_CAB_FALLBACK, p).first()
+        r = ctx.query(alias, fallback, p).first()
     if not r:
         return None
     r["USUARIO_NOME"] = nome_usuario(ctx, alias, emp, fmt.to_int(r.get("USUCODIGO")))
     return r
 
 
-def sql_produtos(conn) -> str:
+def sql_produtos(conn, origem: str = ORIGEM_OS) -> str:
+    if origem == ORIGEM_DAV:
+        return (
+            "SELECT DI.DAVITEMORDEM AS OSPRODCONTADOR, " + select_codigo_produto(conn) +
+            "P.PRODDESCRICAO, DI.DAVITEMQTDE AS OSPRODQUANTIDADE, DI.DAVITEMUNITARIO AS OSPRODUNITARIO, "
+            "DI.DAVITEMTOTALDESCONTO AS OSPRODDESCONTO, DI.DAVITEMTOTALLIQUIDO AS OSPRODLIQUIDO "
+            "FROM DAVITEM DI "
+            "LEFT JOIN PRODUTO P ON P.PRODCONTADOR = DI.PRODCONTADOR AND P.EMPCODIGO = DI.EMPCODIGO "
+            "WHERE DI.EMPCODIGO = :EMPCODIGO AND DI.DAVCONTADOR = :OSCONTADOR ORDER BY DI.DAVITEMORDEM")
     return (
         "SELECT OP.OSPRODCONTADOR, " + select_codigo_produto(conn) +
         "P.PRODDESCRICAO, OP.OSPRODQUANTIDADE, OP.OSPRODUNITARIO, OP.OSPRODDESCONTO, OP.OSPRODLIQUIDO "
@@ -122,7 +275,18 @@ def sql_produtos(conn) -> str:
         "WHERE OP.EMPCODIGO = :EMPCODIGO AND OP.OSCONTADOR = :OSCONTADOR ORDER BY OP.OSPRODCONTADOR")
 
 
-def sql_servicos(conn) -> str:
+def sql_servicos(conn, origem: str = ORIGEM_OS) -> str:
+    if origem == ORIGEM_DAV:
+        return (
+            "SELECT DS.DAVITEMSERVORDEM AS OSSERVCONTADOR, " + select_codigo_servico(conn) +
+            "S.SERVDESCRICAO, DS.DAVITEMSERVQTDE AS OSSERVQUANTIDADE, DS.DAVITEMSERVUNITARIO AS OSSERVUNITARIO, "
+            "DS.DAVITEMSERVDESCONTO AS OSSERVDESCONTO, DS.DAVITEMSERVTOTALLIQUIDO AS OSSERVLIQUIDO, "
+            "PF.PESNOME AS FUNCIONARIO "
+            "FROM DAVITEMSERVICO DS "
+            "LEFT JOIN SERVICO S ON S.SERVCONTADOR = DS.SERVCONTADOR AND S.EMPCODIGO = DS.EMPCODIGO "
+            "LEFT JOIN FUNCIONARIO F ON F.EMPCODIGO = DS.EMPCODIGO AND F.FUNCODIGO = DS.FUNCODIGO "
+            "LEFT JOIN PESSOA PF ON PF.PESCODIGO = F.PESCODIGO "
+            "WHERE DS.EMPCODIGO = :EMPCODIGO AND DS.DAVCONTADOR = :OSCONTADOR ORDER BY DS.DAVITEMSERVORDEM")
     return (
         "SELECT OS_.OSSERVCONTADOR, " + select_codigo_servico(conn) +
         "S.SERVDESCRICAO, OS_.OSSERVQUANTIDADE, OS_.OSSERVUNITARIO, OS_.OSSERVDESCONTO, OS_.OSSERVLIQUIDO, "
@@ -134,8 +298,12 @@ def sql_servicos(conn) -> str:
         "WHERE OS_.EMPCODIGO = :EMPCODIGO AND OS_.OSCONTADOR = :OSCONTADOR ORDER BY OS_.OSSERVCONTADOR")
 
 
-SQL_EQUIPAMENTOS = (
+_EQUIP_COLS = (
     "SELECT EQ.OSEQUIPDESCRICAO, EQ.OSEQUIPIDENTIFICACAO, TE.OSTIPEQUIPDESCRICAO, "
+)
+
+SQL_EQUIPAMENTOS = (
+    _EQUIP_COLS +
     "(SELECT FIRST 1 V.OSVEICPLACA FROM OSEQUIPAMENTOVEICULO EV "
     " JOIN OSVEICULOS V ON V.EMPCODIGO = EV.EMPCODIGO AND V.OSVEICCONTADOR = EV.OSVEICCONTADOR "
     " WHERE EV.EMPCODIGO = EQ.EMPCODIGO AND EV.OSEQUIPCONTADOR = EQ.OSEQUIPCONTADOR) AS PLACA "
@@ -145,6 +313,22 @@ SQL_EQUIPAMENTOS = (
     "WHERE EO.EMPCODIGO = :EMPCODIGO AND EO.OSCONTADOR = :OSCONTADOR ORDER BY EQ.OSEQUIPDESCRICAO"
 )
 
+# DAV: equipamento (DAVEQUIPAMENTO) e, se houver, veiculo (DAVVEICULO -> VEICULO.VEICPLACA)
+SQL_EQUIPAMENTOS_DAV = (
+    _EQUIP_COLS +
+    "CAST(NULL AS VARCHAR(20)) AS PLACA "
+    "FROM DAVEQUIPAMENTO DE "
+    "JOIN OSEQUIPAMENTO EQ ON EQ.EMPCODIGO = DE.EMPCODIGO AND EQ.OSEQUIPCONTADOR = DE.OSEQUIPCONTADOR "
+    "LEFT JOIN OSTIPOEQUIPAMENTO TE ON TE.EMPCODIGO = EQ.EMPCODIGO AND TE.OSTIPEQUIPCONTADOR = EQ.OSTIPEQUIPCONTADOR "
+    "WHERE DE.EMPCODIGO = :EMPCODIGO AND DE.DAVCONTADOR = :OSCONTADOR "
+    "UNION ALL "
+    "SELECT CAST('Veículo' AS VARCHAR(100)), CAST(NULL AS VARCHAR(60)), CAST(NULL AS VARCHAR(60)), V.VEICPLACA "
+    "FROM DAVVEICULO DV "
+    "JOIN VEICULO V ON V.EMPCODIGO = DV.EMPCODIGO AND V.VEICCODIGO = DV.VEICCODIGO "
+    "WHERE DV.EMPCODIGO = :EMPCODIGO AND DV.DAVCONTADOR = :OSCONTADOR"
+)
+SQL_EQUIPAMENTOS_DAV_SIMPLES = SQL_EQUIPAMENTOS_DAV.split(" UNION ALL ")[0] + " ORDER BY EQ.OSEQUIPDESCRICAO"
+
 SQL_HISTORICO = (
     "SELECT H.OSESTHISTDATA, H.OSESTHISTHORA, E.OSESTDESCRICAO, H.PESNOME, H.OSESTHISTOBS "
     "FROM OSESTAGIOSHISTORICO H "
@@ -153,11 +337,39 @@ SQL_HISTORICO = (
     "ORDER BY H.OSESTHISTDATA, H.OSESTHISTHORA, H.OSESTHISTCONTADOR"
 )
 
+SQL_HISTORICO_DAV = (
+    "SELECT H.DAVESTHISTDATA AS OSESTHISTDATA, H.DAVESTHISTHORA AS OSESTHISTHORA, "
+    "E.DAVESTDESCRICAO AS OSESTDESCRICAO, "
+    "COALESCE(U.USUNOME, U.USULOGIN) AS PESNOME, H.DAVESTHISTOBSERVACAO AS OSESTHISTOBS "
+    "FROM DAVESTAGIOHISTORICO H "
+    "LEFT JOIN DAVESTAGIO E ON E.EMPCODIGO = H.EMPCODIGO AND E.DAVESTCONTADOR = H.DAVESTCONTADOR "
+    "LEFT JOIN USUARIO U ON U.USUCODIGO = H.USUCODIGO "
+    "WHERE H.EMPCODIGO = :EMPCODIGO AND H.DAVCONTADOR = :OSCONTADOR "
+    "ORDER BY H.DAVESTHISTDATA, H.DAVESTHISTHORA, H.DAVESTHISTCONTADOR"
+)
+SQL_HISTORICO_DAV_SIMPLES = (
+    "SELECT H.DAVESTHISTDATA AS OSESTHISTDATA, H.DAVESTHISTHORA AS OSESTHISTHORA, "
+    "E.DAVESTDESCRICAO AS OSESTDESCRICAO, CAST(NULL AS VARCHAR(100)) AS PESNOME, "
+    "H.DAVESTHISTOBSERVACAO AS OSESTHISTOBS "
+    "FROM DAVESTAGIOHISTORICO H "
+    "LEFT JOIN DAVESTAGIO E ON E.EMPCODIGO = H.EMPCODIGO AND E.DAVESTCONTADOR = H.DAVESTCONTADOR "
+    "WHERE H.EMPCODIGO = :EMPCODIGO AND H.DAVCONTADOR = :OSCONTADOR "
+    "ORDER BY H.DAVESTHISTDATA, H.DAVESTHISTHORA, H.DAVESTHISTCONTADOR"
+)
+
 SQL_DAVS = (
     "SELECT D.DAVNUMERO, D.DAVEMISSAO, D.DAVTOTALLIQUIDO "
     "FROM OSDAV OD "
     "JOIN DAV D ON D.EMPCODIGO = OD.EMPCODIGO AND D.DAVCONTADOR = OD.DAVCONTADOR "
     "WHERE OD.EMPCODIGO = :EMPCODIGO AND OD.OSCONTADOR = :OSCONTADOR ORDER BY D.DAVNUMERO"
+)
+
+# DAV: documentos vinculados (DAVVINCULADO)
+SQL_DAVS_DAV = (
+    "SELECT D.DAVNUMERO, D.DAVEMISSAO, D.DAVTOTALLIQUIDO "
+    "FROM DAVVINCULADO V "
+    "JOIN DAV D ON D.EMPCODIGO = V.EMPCODIGO AND D.DAVCONTADOR = V.DAVVINCCONTADOR "
+    "WHERE V.EMPCODIGO = :EMPCODIGO AND V.DAVCONTADOR = :OSCONTADOR ORDER BY D.DAVNUMERO"
 )
 
 SQL_SEGURADORA = (

@@ -122,16 +122,22 @@ def observacao_documento(ctx, alias: str, row: Optional[Dict[str, Any]], preferi
 def nome_usuario(ctx, alias: str, emp: int, usu: int) -> str:
     if emp <= 0 or usu <= 0:
         return ""
-    try:
-        r = ctx.query(
-            alias,
-            "SELECT FIRST 1 COALESCE(P.PESNOME, U.USUNOME, U.USULOGIN) AS NOME "
-            "FROM USUARIO U LEFT JOIN PESSOA P ON P.PESCODIGO = U.PESCODIGO "
-            "WHERE U.EMPCODIGO = :EMPCODIGO AND U.USUCODIGO = :USUCODIGO",
-            {"EMPCODIGO": emp, "USUCODIGO": usu}).first()
-    except Exception:  # noqa: BLE001
-        return ""
-    return fmt.texto(r.get("NOME")) if r else ""
+    # Esquemas variam: USUARIO pode ou nao ter EMPCODIGO/PESCODIGO (ex.: NEO/TREICON1 nao tem).
+    tentativas = (
+        ("SELECT FIRST 1 COALESCE(P.PESNOME, U.USUNOME, U.USULOGIN) AS NOME "
+         "FROM USUARIO U LEFT JOIN PESSOA P ON P.PESCODIGO = U.PESCODIGO "
+         "WHERE U.EMPCODIGO = :EMPCODIGO AND U.USUCODIGO = :USUCODIGO",
+         {"EMPCODIGO": emp, "USUCODIGO": usu}),
+        ("SELECT FIRST 1 COALESCE(U.USUNOME, U.USULOGIN) AS NOME FROM USUARIO U WHERE U.USUCODIGO = :USUCODIGO",
+         {"USUCODIGO": usu}),
+    )
+    for sql, params in tentativas:
+        try:
+            r = ctx.query(alias, sql, params).first()
+        except Exception:  # noqa: BLE001
+            continue
+        return fmt.texto(r.get("NOME")) if r else ""
+    return ""
 
 
 def soma(rows: List[Dict[str, Any]], campo: str) -> float:

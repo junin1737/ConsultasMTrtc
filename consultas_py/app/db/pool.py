@@ -81,10 +81,15 @@ class ConnectionManager:
         return conn.query(sql, params, max_rows)
 
     def query_all(self, builder: Callable[[FirebirdConnection], Tuple[str, Dict[str, Any]]],
-                  max_rows: Optional[int] = None) -> MergedResult:
-        """Executa ``builder(conn) -> (sql, params)`` em cada base ativa e une os resultados."""
+                  max_rows: Optional[int] = None, only: Optional[str] = None) -> MergedResult:
+        """Executa ``builder(conn) -> (sql, params)`` em cada base ativa e une os resultados.
+
+        ``only``: apelido de uma base; quando informado, consulta somente essa base.
+        """
         merged = MergedResult()
         for conn in self.connections():
+            if only and conn.alias != only:
+                continue
             try:
                 sql, params = builder(conn)
                 r = conn.query(sql, params, max_rows)

@@ -49,6 +49,23 @@ def selftest(out_path: str) -> int:
     return 0 if ok else 1
 
 
+def _install_excepthook() -> None:
+    """Excecoes nao tratadas em slots gravam em consultas_erro.log em vez de derrubar o aplicativo."""
+    import time
+    import traceback
+
+    def hook(exc_type, exc, tb) -> None:
+        try:
+            from app.config import config_dir
+
+            with open(os.path.join(config_dir(), "consultas_erro.log"), "a", encoding="utf-8") as fh:
+                fh.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + "".join(traceback.format_exception(exc_type, exc, tb)) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+
+    sys.excepthook = hook
+
+
 def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         return selftest(sys.argv[2])
@@ -62,6 +79,9 @@ def main() -> int:
 
     qapp = QApplication(sys.argv)
     qapp.setApplicationName("Consultas")
+    # fechar modulos/dialogos nunca encerra o app: so o fechamento da tela inicial (MainWindow.closeEvent)
+    qapp.setQuitOnLastWindowClosed(False)
+    _install_excepthook()
     apply_theme(qapp)
 
     cfg = load_config()
